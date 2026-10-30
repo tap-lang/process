@@ -1,0 +1,88 @@
+// command 模块的用法演示，同时也是它的测试。
+import command;
+import std.vec as vec;
+
+fn main(): i32 {
+    // 1. 捕获 stdout
+    let echo: Command = command.new("echo");
+    echo = command.arg(echo, "hello from process");
+    let result: Result<Output, String> = command.output(echo);
+    match (result) {
+        Result.Ok(value) => {
+            print("[echo] exit=%d out=%s", value.status, value.stdout);
+        }
+        Result.Err(reason) => {
+            print("[echo] error: %s\n", reason);
+        }
+    }
+
+    // 2. stdout / stderr 分离 + 非零退出码
+    let script: Command = command.new("sh");
+    script = command.arg(script, "-c");
+    script = command.arg(script, "echo to-stdout; echo to-stderr >&2; exit 3");
+    let result2: Result<Output, String> = command.output(script);
+    match (result2) {
+        Result.Ok(value) => {
+            print("[split] exit=%d\n", value.status);
+            print("  out=%s", value.stdout);
+            print("  err=%s", value.stderr);
+        }
+        Result.Err(reason) => {
+            print("[split] error: %s\n", reason);
+        }
+    }
+
+    // 3. 工作目录
+    let pwd: Command = command.new("pwd");
+    pwd = command.current_dir(pwd, "/tmp");
+    let result3: Result<Output, String> = command.output(pwd);
+    match (result3) {
+        Result.Ok(value) => {
+            print("[cwd] %s", value.stdout);
+        }
+        Result.Err(reason) => {
+            print("[cwd] error: %s\n", reason);
+        }
+    }
+
+    // 4. 环境变量
+    let show_env: Command = command.new("sh");
+    show_env = command.arg(show_env, "-c");
+    show_env = command.arg(show_env, "echo TAP_PROCESS_DEMO=$TAP_PROCESS_DEMO");
+    show_env = command.env(show_env, "TAP_PROCESS_DEMO", "42");
+    let result4: Result<Output, String> = command.output(show_env);
+    match (result4) {
+        Result.Ok(value) => {
+            print("[env] %s", value.stdout);
+        }
+        Result.Err(reason) => {
+            print("[env] error: %s\n", reason);
+        }
+    }
+
+    // 5. 命令不存在：execvp 失败，子进程按约定返回 127
+    let missing: Command = command.new("this-command-does-not-exist");
+    let result5: Result<Output, String> = command.output(missing);
+    match (result5) {
+        Result.Ok(value) => {
+            print("[missing] exit=%d\n", value.status);
+        }
+        Result.Err(reason) => {
+            print("[missing] error: %s\n", reason);
+        }
+    }
+
+    // 6. 只要退出码
+    let check: Command = command.new("true");
+    let result6: Result<i32, String> = command.status(check);
+    match (result6) {
+        Result.Ok(code) => {
+            print("[status] exit=%d\n", code);
+        }
+        Result.Err(reason) => {
+            print("[status] error: %s\n", reason);
+        }
+    }
+
+    return 0;
+}

@@ -1,0 +1,246 @@
+// 子进程执行：类似 Rust 的 std::process::Command。
+//
+// 为什么不用 std.sys.system()：它只返回退出码，拿不到子进程的输出。
+// 为什么不用 popen：它只能单向（要么读 stdout 要么写 stdin），而且 stderr
+// 只能靠 `2>&1` 合并 —— 拿不到分离的两路。
+//
+// 所以走 fork + execvp + 两个 pipe：
+//   - argv 是数组，不经过 shell，没有命令注入问题；
+//   - stdout / stderr 各自一个 pipe，能分开拿。
+//
+// 已知限制（见 README）：
+//   - 父进程先读完 stdout 再读 stderr。如果子进程往 stderr 写超过管道缓冲
+//     （Linux/macOS 通常 64 KB）而 stdout 还没关，两边会互相等待 —— 死锁。
+//     要彻底解决得用 poll 同时读，那一层还没做。
+//   - 只返回正常退出的退出码；被信号杀死的进程给出 -1。
+//   - 不支持 stdin 重定向。
+
+import std.memory as memory;
+import std.vec as vec;
+import std.string_builder as sb;
+
+extern fn pipe(fds: *i32): i32;
+extern fn fork(): i32;
+extern fn dup2(old: i32, new: i32): i32;
+extern fn close(fd: i32): i32;
+extern fn read(fd: i32, buffer: *u8, count: u64): i64;
+extern fn execvp(file: *u8, argv: **u8): i32;
+extern fn waitpid(pid: i32, status: *i32, options: i32): i32;
+extern fn chdir(path: *u8): i32;
+extern fn setenv(name: *u8, value: *u8, overwrite: i32): i32;
+// _exit 实际不返回；tap 没有 void 返回类型，声明成 i32 让调用点能通过类型检查。
+extern fn _exit(code: i32): i32;
+
+const READ_CHUNK: u64 = 4096;
+
+pub struct Command {
+    program: String,
+    args: Vec<String>,
+    env_keys: Vec<String>,
+    env_values: Vec<String>,
+    working_dir: String,
+}
+
+pub struct Output {
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+pub fn new(program: String): Command {
+    let empty_args: Vec<String> = vec.new<String>();
+    let empty_keys: Vec<String> = vec.new<String>();
+    let empty_values: Vec<String> = vec.new<String>();
+    let command: Command = Command {
+        program: program,
+        args: empty_args,
+        env_keys: empty_keys,
+        env_values: empty_values,
+        working_dir: "",
+    };
+    return command;
+}
+
+pub fn arg(command: Command, value: String): Command {
+    let updated: Vec<String> = vec.push(command.args, value);
+    command.args = updated;
+    return command;
+}
+
+pub fn args(command: Command, values: Vec<String>): Command {
+    let result: Command = command;
+    for (let i: i64 = 0; i < values.len() as i64; i = i + 1) {
+        result = arg(result, values.get(i as uint));
+    }
+    return result;
+}
+
+pub fn env(command: Command, key: String, value: String): Command {
+    let updated_keys: Vec<String> = vec.push(command.env_keys, key);
+    let updated_values: Vec<String> = vec.push(command.env_values, value);
+    command.env_keys = updated_keys;
+    command.env_values = updated_values;
+    return command;
+}
+
+pub fn current_dir(command: Command, path: String): Command {
+    command.working_dir = path;
+    return command;
+}
+
+// ---- 内部 ----
+
+// String 的底层是 {ptr, len}，没有 C 需要的 NUL；复制到新缓冲区并补 0。
+//
+// 这里逐字节复制而不是用 __tap_string_copy_bytes：那个 Runtime ABI 已经被
+// std.byte_vec 声明过，顶层函数名全程序唯一，再声明一次会报 duplicate。
+// 字符串都很短（命令名、参数），逐字节的开销可以忽略。
+fn to_c_string(value: String): *u8 {
+    let length: uint = value.len();
+    let buffer: *u8 = memory.malloc<u8>(length + 1);
+    for (let i: uint = 0; i < length; i = i + 1) {
+        buffer[i] = value.byte_at(i);
+    }
+    buffer[length] = 0;
+    return buffer;
+}
+
+// 读一个 fd 到 EOF。管道读到写端关闭时 read 返回 0。
+fn read_all(fd: i32): String {
+    let builder: StringBuilder = sb.new();
+    let buffer: [u8; 4096] = [0; 4096];
+    while (true) {
+        let count: i64 = read(fd, &buffer[0], READ_CHUNK);
+        if (count <= 0) {
+            break;
+        }
+        for (let i: i64 = 0; i < count; i = i + 1) {
+            builder = sb.append_byte(builder, buffer[i as uint]);
+        }
+    }
+    return sb.to_string(builder);
+}
+
+// ---- 公开接口 ----
+
+// 执行并等待，捕获 stdout / stderr。
+//
+// 子进程里做 chdir / setenv / execvp 的东西**全部在 fork 之前**准备好：
+// 实测在子进程里构造 C 字符串会拿到乱码（fork 之后的内存状态不可靠），
+// 所以 program / argv / env 的 C 字符串都在父进程侧一次建好。
+pub fn output(command: Command): Result<Output, String> {
+    let argument_count: uint = vec.len(command.args);
+    let env_count: uint = vec.len(command.env_keys);
+
+    let program: *u8 = to_c_string(command.program);
+
+    // 用 Vec<*u8> 而不是 malloc 出来的 **u8：`env_names[i]` 这种下标在
+    // tap 里推断出来会少一层指针（和 Vec<*T> 那个 bug 同源），
+    // vec.get 的返回类型是准的。所有 push 做完再取 .data —— 中途 realloc
+    // 会让之前拿到的指针失效。
+    let argv: Vec<*u8> = vec.new<*u8>();
+    argv = vec.push(argv, program);
+    for (let i: uint = 0; i < argument_count; i = i + 1) {
+        argv = vec.push(argv, to_c_string(vec.get(command.args, i)));
+    }
+    let terminator: *u8 = null;
+    argv = vec.push(argv, terminator);
+
+    let env_names: Vec<*u8> = vec.new<*u8>();
+    let env_values: Vec<*u8> = vec.new<*u8>();
+    for (let i: uint = 0; i < env_count; i = i + 1) {
+        env_names = vec.push(env_names, to_c_string(vec.get(command.env_keys, i)));
+        env_values = vec.push(env_values, to_c_string(vec.get(command.env_values, i)));
+    }
+
+    let directory: *u8 = null;
+    let directory_path: String = command.working_dir;
+    if (directory_path.len() > 0) {
+        directory = to_c_string(directory_path);
+    }
+
+    let out_fds: [i32; 2] = [0; 2];
+    let err_fds: [i32; 2] = [0; 2];
+    if (pipe(&out_fds[0]) != 0) {
+        return Result.Err("pipe() failed");
+    }
+    if (pipe(&err_fds[0]) != 0) {
+        close(out_fds[0]);
+        close(out_fds[1]);
+        return Result.Err("pipe() failed");
+    }
+
+    let pid: i32 = fork();
+    if (pid < 0) {
+        close(out_fds[0]);
+        close(out_fds[1]);
+        close(err_fds[0]);
+        close(err_fds[1]);
+        return Result.Err("fork() failed");
+    }
+
+    if (pid == 0) {
+        // 子进程：把两个管道的写端接到 1 / 2，然后换成目标程序。
+        // execvp 成功就再也不回来了；失败的话 return 127 让父进程看到。
+        close(out_fds[0]);
+        close(err_fds[0]);
+        dup2(out_fds[1], 1);
+        dup2(err_fds[1], 2);
+        close(out_fds[1]);
+        close(err_fds[1]);
+
+        if (directory != null) {
+            chdir(directory);
+        }
+        for (let i: uint = 0; i < env_count; i = i + 1) {
+            // 通过临时变量取，`**u8` 直接下标喂给 extern 会报类型不匹配
+            let name: *u8 = vec.get(env_names, i);
+            let value: *u8 = vec.get(env_values, i);
+            setenv(name, value, 1);
+        }
+        execvp(program, argv.data);
+        // execvp 成功就再也不回来了；失败时用 _exit 立刻退出子进程，
+        // 不能 return —— 那会继续执行下面的父进程代码。
+        _exit(127);
+        return Result.Err("unreachable");
+    }
+
+    // 父进程：关掉写端，否则 read 永远等不到 EOF。
+    close(out_fds[1]);
+    close(err_fds[1]);
+
+    let captured_out: String = read_all(out_fds[0]);
+    close(out_fds[0]);
+    let captured_err: String = read_all(err_fds[0]);
+    close(err_fds[0]);
+
+    let status: [i32; 1] = [0; 1];
+    waitpid(pid, &status[0], 0);
+
+    // 低 7 位是终止信号，为 0 才代表正常退出。
+    let code: i32 = -1;
+    if ((status[0] & 127) == 0) {
+        code = (status[0] >> 8) & 255;
+    }
+
+    let captured: Output = Output {
+        status: code,
+        stdout: captured_out,
+        stderr: captured_err,
+    };
+    return Result.Ok(captured);
+}
+
+// 只要退出码。语义上等价于 Rust 的 status()，但实现上仍然捕获了输出
+// （不读的话子进程写满管道会卡住）。
+pub fn status(command: Command): Result<i32, String> {
+    let result: Result<Output, String> = output(command);
+    if (!result.is_ok()) {
+        return Result.Err("command failed");
+    }
+    let value: Output = match (result) {
+        Result.Ok(inner) => inner,
+        Result.Err(reason) => Output { status: -1, stdout: "", stderr: "" },
+    };
+    return Result.Ok(value.status);
+}
