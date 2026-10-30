@@ -1,0 +1,35 @@
+// execvp 失败按约定返回 127；status() 只返回退出码。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+
+    let missing: Command = proc.new("tap-process-command-that-does-not-exist");
+    let missing_result: Result<Output, String> = proc.output(missing);
+    match (missing_result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, 127, "不存在命令的退出码");
+            c = lib.expect_string(c, value.stdout, "", "不存在命令的 stdout");
+            c = lib.expect_string(c, value.stderr, "", "不存在命令的 stderr");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "execvp 失败不应返回 Err: " + reason);
+        }
+    }
+
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command, "exit 23");
+    let status_result: Result<i32, String> = proc.status(command);
+    match (status_result) {
+        Result.Ok(code) => {
+            c = lib.expect_i32(c, code, 23, "status() 返回值");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "status() 意外返回 Err: " + reason);
+        }
+    }
+
+    return lib.finish(c);
+}

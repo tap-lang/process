@@ -1,0 +1,26 @@
+// 两路输出都超过常见管道容量，验证 poll 同时排空 stdout/stderr，不死锁也不截断。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command,
+        "i=0; while [ $i -lt 12000 ]; do printf 'out-%d\\n' $i; printf 'err-%d\\n' $i >&2; i=$((i + 1)); done");
+
+    let result: Result<Output, String> = proc.output(command);
+    match (result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, 0, "退出码");
+            c = lib.expect_contains(c, value.stdout, "out-0\n", "stdout 开头");
+            c = lib.expect_contains(c, value.stdout, "out-11999\n", "stdout 末尾");
+            c = lib.expect_contains(c, value.stderr, "err-0\n", "stderr 开头");
+            c = lib.expect_contains(c, value.stderr, "err-11999\n", "stderr 末尾");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "大输出捕获意外返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}
