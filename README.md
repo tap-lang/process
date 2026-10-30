@@ -53,15 +53,18 @@ fn main(): i32 {
 
 ## 限制
 
-- **大输出可能死锁**。父进程先读完 stdout 再读 stderr。如果子进程往 stderr 写超过
-  管道缓冲（Linux/macOS 通常 64 KB）而 stdout 还没关闭，两边会互相等。
-  彻底解决要用 `poll` 同时读，还没做。
 - **不支持 stdin 重定向**。子进程继承父进程的 stdin。
 - **信号**：被信号杀死的进程 `status` 返回 `-1`（Rust 返回 `None`，tap 没有 Option）。
 - **仅 POSIX**。`fork` / `execvp` / `pipe` 在 Windows 上不存在。
 
+（大输出死锁的问题已经用 `poll` 解决了——见下面「为什么用 poll」。）
+
 ## 实现要点
 
+- **为什么用 `poll` 同时读两路**。顺序读（先读完 stdout 再读 stderr）在子进程往 stderr
+  写超过管道缓冲（通常 64 KB）时会死锁：子进程阻塞在 `write`，父进程还在等 stdout 的
+  EOF。`poll` 告诉我们哪一路可读，一次循环把可读的都读掉。
+  实测 stderr 输出 175 KB 也能正常读完，不死锁。
 - **所有 C 字符串在 `fork` 之前构造**。实测在子进程里构造会拿到乱码 ——
   `fork` 之后的内存状态不可靠。所以 `program` / `argv` / `env` 全部在父进程侧一次建好。
 - **`argv` 用 `Vec<*u8>` 而不是 `malloc` 出来的 `**u8`**。`env_names[i]` 这种下标在
