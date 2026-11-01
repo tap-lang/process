@@ -1,0 +1,28 @@
+// env() 后写入的同名变量应覆盖前值；current_dir() 只改变子进程目录。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command, "printf '%s|' \"$TAP_PROCESS_TEST\"; pwd");
+    command = proc.env(command, "TAP_PROCESS_TEST", "old");
+    command = proc.env(command, "TAP_PROCESS_TEST", "updated");
+    command = proc.current_dir(command, "/tmp");
+
+    let result: Result<Output, String> = proc.output(command);
+    match (result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, 0, "退出码");
+            c = lib.expect_contains(c, value.stdout, "updated|", "stdout");
+            // macOS 会把 /tmp 规范化成 /private/tmp，两者都包含这个后缀。
+            c = lib.expect_contains(c, value.stdout, "/tmp\n", "工作目录");
+            c = lib.expect_string(c, value.stderr, "", "stderr");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "output() 意外返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}

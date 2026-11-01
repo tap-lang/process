@@ -1,0 +1,21 @@
+// 被信号终止的子进程没有普通退出码，应返回 -1。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command, "kill -TERM $$");
+
+    let result: Result<Output, String> = proc.output(command);
+    match (result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, -1, "信号终止状态");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "信号终止不应返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}

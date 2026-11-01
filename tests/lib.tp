@@ -1,0 +1,47 @@
+// process 包的轻量测试断言。每个断言累加失败数，让同一用例可以报告多个问题。
+pub struct Case {
+    failures: i32,
+}
+
+pub fn case(): Case {
+    return Case { failures: 0 };
+}
+
+pub fn fail(c: Case, message: String): Case {
+    print("    FAIL: %s\n", message);
+    c.failures = c.failures + 1;
+    return c;
+}
+
+pub fn expect_i32(c: Case, actual: i32, expected: i32, label: String): Case {
+    if (actual != expected) {
+        print("    FAIL: %s 应为 %d，实际为 %d\n", label, expected, actual);
+        c.failures = c.failures + 1;
+    }
+    return c;
+}
+
+pub fn expect_string(c: Case, actual: String, expected: String, label: String): Case {
+    if (actual != expected) {
+        print("    FAIL: %s 不匹配\n", label);
+        print("      期望: <%s>\n", expected);
+        print("      实际: <%s>\n", actual);
+        c.failures = c.failures + 1;
+    }
+    return c;
+}
+
+pub fn expect_contains(c: Case, actual: String, expected: String, label: String): Case {
+    if (!actual.contains(expected)) {
+        print("    FAIL: %s 中找不到 <%s>\n", label, expected);
+        c.failures = c.failures + 1;
+    }
+    return c;
+}
+
+pub fn finish(c: Case): i32 {
+    if (c.failures > 0) {
+        return 1;
+    }
+    return 0;
+}

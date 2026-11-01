@@ -1,0 +1,21 @@
+// status_inherit() 应继承标准流并返回退出码；这里的输出会直接进入测试进程的标准流。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command, "printf 'inherited-stdout\\n'; printf 'inherited-stderr\\n' >&2; exit 17");
+
+    let result: Result<i32, String> = proc.status_inherit(command);
+    match (result) {
+        Result.Ok(code) => {
+            c = lib.expect_i32(c, code, 17, "继承标准流的命令退出码");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "status_inherit() 意外返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}

@@ -1,0 +1,29 @@
+// output() 应捕获标准输出，并保留带空格和空字符串参数的边界。
+import lib;
+import command as proc;
+import std.vec as vec;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let values: Vec<String> = vec.new<String>();
+    values = values.push("-c");
+    values = values.push("printf '<%s><%s>' \"$1\" \"$2\"");
+    values = values.push("test-shell");
+    values = values.push("hello world");
+    values = values.push("");
+
+    let command: Command = proc.new("sh");
+    command = proc.args(command, values);
+    let result: Result<Output, String> = proc.output(command);
+    match (result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, 0, "退出码");
+            c = lib.expect_string(c, value.stdout, "<hello world><>", "stdout");
+            c = lib.expect_string(c, value.stderr, "", "stderr");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "output() 意外返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}

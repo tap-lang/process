@@ -1,0 +1,23 @@
+// stdout/stderr 必须分流；正常启动的非零退出码仍然是 Result.Ok。
+import lib;
+import command as proc;
+
+fn main(): i32 {
+    let c: Case = lib.case();
+    let command: Command = proc.new("sh");
+    command = proc.arg(command, "-c");
+    command = proc.arg(command, "printf 'to-stdout'; printf 'to-stderr' >&2; exit 7");
+
+    let result: Result<Output, String> = proc.output(command);
+    match (result) {
+        Result.Ok(value) => {
+            c = lib.expect_i32(c, value.status, 7, "退出码");
+            c = lib.expect_string(c, value.stdout, "to-stdout", "stdout");
+            c = lib.expect_string(c, value.stderr, "to-stderr", "stderr");
+        }
+        Result.Err(reason) => {
+            c = lib.fail(c, "非零退出码不应返回 Err: " + reason);
+        }
+    }
+    return lib.finish(c);
+}
